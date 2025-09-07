@@ -165,17 +165,21 @@ bool create_async_connected_named_pipe(const char *name, HANDLE *out_read_end, O
 }
 
 bool create_virtual_console(HPCON *virtual_console, LPPROC_THREAD_ATTRIBUTE_LIST *proc_thread_attribute_list, HANDLE output_handle, HANDLE input_handle) {
+    COORD console_size = {
+        .X = 120,
+        .Y = 30,
+    };
+
     CONSOLE_SCREEN_BUFFER_INFO console_screen_info = {0};
-    if (!GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &console_screen_info)) {
-        nob_log(NOB_ERROR, "Failed to get current console size, %s", win32_error_message(GetLastError()));
-        return false;
+    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &console_screen_info)) {
+        console_size = console_screen_info.dwSize;
     }
 
     HPCON console = {0};
     HRESULT result = S_OK;
     LPPROC_THREAD_ATTRIBUTE_LIST attribute_list = NULL;
 
-    if ((result = CreatePseudoConsole(console_screen_info.dwSize, input_handle, output_handle, 0, &console)) != S_OK) {
+    if ((result = CreatePseudoConsole(console_size, input_handle, output_handle, 0, &console)) != S_OK) {
         nob_log(NOB_ERROR, "Failed to create virtual console for powershell, (%d)", result);
         return false;
     }
@@ -337,20 +341,6 @@ typedef enum {
 } PipeState;
 
 int server_main(void) {
-    PipeState input_state = UNCONNECTED;
-    OVERLAPPED input_read_end_overlapped = {0};
-    HANDLE input_read_end = INVALID_HANDLE_VALUE;
-    if (!create_async_name_pipe(SERVER_STDIN_PIPE_NAME, &input_read_end, &input_read_end_overlapped)) {
-        return 1;
-    }
-
-    PipeState output_state = UNCONNECTED;
-    OVERLAPPED output_write_end_overlapped = {0};
-    HANDLE output_write_end = INVALID_HANDLE_VALUE;
-    if (!create_async_name_pipe(SERVER_STDOUT_PIPE_NAME, &output_write_end, &output_write_end_overlapped)) {
-        return 1;
-    }
-
     HANDLE thread_input_read_end, thread_input_write_end;
     if (!CreatePipe(&thread_input_read_end, &thread_input_write_end, NULL, 0)) {
         nob_log(NOB_ERROR, "Failed to create stderr pipe %s", win32_error_message(GetLastError()));
@@ -369,10 +359,10 @@ int server_main(void) {
     DWORD reader_thread_id = 0;
     HANDLE thread_handle = CreateThread(
             NULL,                       // default security attributes
-            0,                          // use default stack size  
+            0,                          // use default stack size
             process_event_handler,      // thread function name
-            &process_event_handler_arg, // argument to thread function 
-            0,                          // use default creation flags 
+            &process_event_handler_arg, // argument to thread function
+            0,                          // use default creation flags
             &reader_thread_id);
     if (thread_handle == INVALID_HANDLE_VALUE) {
         nob_log(NOB_ERROR, "Failed to create powershell handler thread, %s", win32_error_message(GetLastError()));
@@ -380,6 +370,20 @@ int server_main(void) {
     }
 
     nob_log(NOB_INFO, "Powershell handler thread created");
+
+    PipeState output_state = UNCONNECTED;
+    OVERLAPPED output_write_end_overlapped = {0};
+    HANDLE output_write_end = INVALID_HANDLE_VALUE;
+    if (!create_async_name_pipe(SERVER_STDOUT_PIPE_NAME, &output_write_end, &output_write_end_overlapped)) {
+        return 1;
+    }
+
+    PipeState input_state = UNCONNECTED;
+    OVERLAPPED input_read_end_overlapped = {0};
+    HANDLE input_read_end = INVALID_HANDLE_VALUE;
+    if (!create_async_name_pipe(SERVER_STDIN_PIPE_NAME, &input_read_end, &input_read_end_overlapped)) {
+        return 1;
+    }
 
     HANDLE handles[] = {
         [SERVER_INPUT_INDEX] = input_read_end_overlapped.hEvent,
@@ -634,7 +638,60 @@ DWORD WINAPI client_output_reader(void *arg) {
     return 0;
 }
 
-int client_main(void) {
+static PROCESS_INFORMATION server_info = {0};
+void terminate_server(void) {
+    if (!server_info.hProcess) return;
+    TerminateProcess(server_info.hProcess, 254);
+    CloseHandle(server_info.hProcess);
+    CloseHandle(server_info.hThread);
+    ZeroMemory(&server_info, sizeof(server_info));
+}
+bool start_server(char *command_line) {
+    if (server_info.hProcess) {
+        DWORD result = WaitForSingleObject(server_info.hProcess, 10);
+        if (result == WAIT_TIMEOUT) {
+            return true;
+        }
+
+        if (result != WAIT_OBJECT_0) {
+            nob_log(NOB_ERROR, "Failed to wait for server process, %s (%d)", win32_error_message(GetLastError()), GetLastError());
+            return false;
+        }
+
+        DWORD exit_code = 255;
+        GetExitCodeProcess(server_info.hProcess, &exit_code);
+        nob_log(NOB_INFO, "Server exited with code (%d)", exit_code);
+        CloseHandle(server_info.hProcess);
+        CloseHandle(server_info.hThread);
+        ZeroMemory(&server_info, sizeof(server_info));
+    }
+
+    STARTUPINFO startup_info = {
+        .cb = sizeof(STARTUPINFO)
+    };
+
+    BOOL success = CreateProcessA(
+        NULL,
+        command_line,
+        NULL,
+        NULL,
+        FALSE,
+        DETACHED_PROCESS,
+        NULL,
+        NULL,
+        &startup_info,
+        &server_info
+    );
+    if (!success) {
+        nob_log(NOB_ERROR, "Failed to create server process, %s (%d)", win32_error_message(GetLastError()), GetLastError());
+        return false;
+    }
+    nob_log(NOB_INFO, "Started detached server, command line: %s (%d)", command_line, server_info.dwProcessId);
+
+    return true;
+}
+
+int client_main(char *server_command_line) {
     DWORD console_mode = 0;
     HANDLE console_input = GetStdHandle(STD_INPUT_HANDLE);
     HANDLE console_output = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -649,28 +706,51 @@ int client_main(void) {
         return 1;
     }
 
-    HANDLE server_input = CreateFileA(
-        SERVER_STDIN_PIPE_NAME,
-        GENERIC_WRITE,
-        0,
-        NULL,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL
-    );
-    if (server_input == INVALID_HANDLE_VALUE) {
-        nob_log(NOB_ERROR, "Failed to connect to server input, (%d) %s", GetLastError(), win32_error_message(GetLastError()));
-        return 1;
-    }
+    HANDLE server_input = INVALID_HANDLE_VALUE;
+    bool should_start_server = false;
+    do {
+        if (should_start_server && !start_server(server_command_line)) {
+            return 1;
+        }
+
+        server_input = CreateFileA(
+            SERVER_STDIN_PIPE_NAME,
+            GENERIC_WRITE,
+            0,
+            NULL,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            NULL
+        );
+
+        if (server_input == INVALID_HANDLE_VALUE) {
+            if (GetLastError() == ERROR_FILE_NOT_FOUND) {
+                if (should_start_server) {
+                    nob_log(NOB_INFO, "Waiting for server to initialize pipes");
+                    Sleep(100);
+                } else {
+                    nob_log(NOB_INFO, "Server has not started yet, starting server...");
+                    should_start_server = true;
+                }
+                continue;
+            }
+
+            terminate_server();
+            nob_log(NOB_ERROR, "Failed to connect to server input, (%d) %s", GetLastError(), win32_error_message(GetLastError()));
+            return 1;
+        }
+
+        break;
+    } while (true);
     nob_log(NOB_INFO, "Server input connected");
 
     DWORD reader_thread_id = 0;
     HANDLE thread_handle = CreateThread(
             NULL,                       // default security attributes
-            0,                          // use default stack size  
+            0,                          // use default stack size
             client_output_reader,       // thread function name
-            NULL,                       // argument to thread function 
-            0,                          // use default creation flags 
+            NULL,                       // argument to thread function
+            0,                          // use default creation flags
             &reader_thread_id);
     if (thread_handle == INVALID_HANDLE_VALUE) {
         nob_log(NOB_ERROR, "Failed to create client reader thread, %s", win32_error_message(GetLastError()));
@@ -702,9 +782,9 @@ int client_main(void) {
 int main(int argc, char **argv) {
     nob_log(NOB_INFO, "%s started with pid: %d", GetCommandLineA(), GetCurrentProcessId());
     char *program_name = shift(argv, argc);
-    UNUSED(program_name);
+    char *server_command_line = temp_sprintf("\"%s\" \"server\"", program_name);
     if (argc == 0) {
-        TODO("Usage instruction");
+        return client_main(server_command_line);
     }
 
     char *mode = shift(argv, argc);
@@ -713,8 +793,13 @@ int main(int argc, char **argv) {
     }
 
     if (strcmp(mode, "client") == 0) {
-        return client_main();
+        return client_main(server_command_line);
     }
 
     TODO("Usage instruction");
 }
+
+// [_] TODO: log to file for both client and server
+// [_] TODO: allow disconnect client with command/keybinding
+// [_] TODO: allow customize shell
+// [X] TODO: client check and start server if needed
