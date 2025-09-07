@@ -389,6 +389,9 @@ int server_main(void) {
     };
     char input_buffer[PIPE_BUFFER_SIZE] = {0};
     char output_buffer[PIPE_BUFFER_SIZE] = {0};
+    size_t unsent_output_buffer_length = 0;
+    const size_t to_be_erased_when_output_full = min(max(ARRAY_LEN(output_buffer) / 16, 2), ARRAY_LEN(output_buffer));
+    bool started_reading_process_output = false;
 
     bool running = true;
     bool reset_connection = false;
@@ -483,9 +486,17 @@ int server_main(void) {
                 if (output_state == CONNECTING) {
                     output_state = CONNECTED;
                     nob_log(NOB_INFO, "Output pipe connected");
+
+                    if (started_reading_process_output) {
+                        break;
+                    }
+
+                    assert(unsent_output_buffer_length == 0);
                     if (!start_read(output_buffer, ARRAY_LEN(output_buffer), thread_output_read_end, &thread_output_overlapped, output_write_end)) {
                         break;
                     }
+
+                    started_reading_process_output = true;
                 }
             } break;
 
@@ -494,19 +505,39 @@ int server_main(void) {
                     nob_log(NOB_WARNING, "Failed to get process handler output overlapped result, %s", win32_error_message(GetLastError()));
                     break;
                 }
+
+                started_reading_process_output = false;
+
                 if (output_state == CONNECTED) {
+                    if (unsent_output_buffer_length > 0) {
+                        bytes += (DWORD)unsent_output_buffer_length;
+                        unsent_output_buffer_length = 0;
+                    }
+
                     if (!WriteFile(output_write_end, output_buffer, bytes, NULL, NULL)) {
                         nob_log(NOB_WARNING, "Failed to write to client, %s (%d)", win32_error_message(GetLastError()), GetLastError());
                         reset_connection = true;
-                        break;
                     }
                 } else {
-                    nob_log(NOB_WARNING, "Output not connected");
+                    if (unsent_output_buffer_length + bytes <= ARRAY_LEN(output_buffer)) {
+                        unsent_output_buffer_length += bytes;
+                        nob_log(NOB_WARNING, "Output not connected, buffer it for later client");
+                    } else {
+                        nob_log(NOB_WARNING, "Output not connected, run out of space to buffer it");
+                    }
                 }
 
-                if (!start_read(output_buffer, ARRAY_LEN(output_buffer), thread_output_read_end, &thread_output_overlapped, output_write_end)) {
+                if (unsent_output_buffer_length >= ARRAY_LEN(output_buffer)) {
+                    nob_log(NOB_WARNING, "Output buffer, erase %zu first bytes to make room for new output", to_be_erased_when_output_full);
+                    memmove(output_buffer, output_buffer + to_be_erased_when_output_full, unsent_output_buffer_length - to_be_erased_when_output_full);
+                    unsent_output_buffer_length -= to_be_erased_when_output_full;
+                }
+
+                if (!start_read(output_buffer + unsent_output_buffer_length, ARRAY_LEN(output_buffer) - unsent_output_buffer_length, thread_output_read_end, &thread_output_overlapped, output_write_end)) {
                     break;
                 }
+
+                started_reading_process_output = true;
             } break;
 
             case PROCESS_HANDLER_THREAD_INDEX: {
