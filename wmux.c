@@ -251,7 +251,7 @@ DWORD WINAPI process_event_handler(void *_arg) {
     }
 
     const HANDLE handles[] = {
-        [STDOUT_INDEX] = process_out,
+        [STDOUT_INDEX] = process_out_overlapped.hEvent,
         [PROCESS_INDEX] = process_info.hProcess
         // [PROCESS_THREAD_INDEX] = arg->process.hThread,
     };
@@ -260,6 +260,7 @@ DWORD WINAPI process_event_handler(void *_arg) {
     if (!start_read(stdout_buffer, ARRAY_LEN(stdout_buffer), process_out, &process_out_overlapped, arg->thread_out)) {
         return 1;
     }
+    bool process_exited = false;
 
     while (true) {
         DWORD result = WaitForMultipleObjects(ARRAY_LEN(handles), handles, FALSE, INFINITE);
@@ -289,9 +290,9 @@ DWORD WINAPI process_event_handler(void *_arg) {
             if (bytes == 0) {
                 break;
             }
-            if (!WriteConsoleA(arg->thread_out, stdout_buffer, bytes, NULL, NULL)) {
-                nob_log(NOB_ERROR, "Failed to write to stdout, %s", win32_error_message(GetLastError()));
-                return false;
+            if (!WriteFile(arg->thread_out, stdout_buffer, bytes, NULL, NULL)) {
+                nob_log(NOB_ERROR, "Failed to write to thread out, %s", win32_error_message(GetLastError()));
+                break;
             }
             if (!start_read(stdout_buffer, ARRAY_LEN(stdout_buffer), process_out, &process_out_overlapped, arg->thread_out)) {
                 break;
@@ -300,6 +301,7 @@ DWORD WINAPI process_event_handler(void *_arg) {
         }
 
         if (index == PROCESS_INDEX) {
+            process_exited = true;
             DWORD exit_code = (DWORD)-1;
             GetExitCodeProcess(process_info.hProcess, &exit_code);
             nob_log(NOB_INFO, "Powershell process exited, code: (%d)", exit_code);
@@ -309,6 +311,9 @@ DWORD WINAPI process_event_handler(void *_arg) {
         UNREACHABLE("Unknown index");
     }
 
+    if (!process_exited) {
+        TerminateProcess(process_info.hProcess, 1);
+    }
     CloseHandle(arg->thread_in);
     CloseHandle(arg->thread_out);
     CloseHandle(process_out_overlapped.hEvent);
@@ -386,6 +391,7 @@ int server_main(void) {
     char output_buffer[PIPE_BUFFER_SIZE] = {0};
 
     bool running = true;
+
     while (running) {
         while (output_state == UNCONNECTED && WaitForSingleObject(thread_handle, 10) == WAIT_TIMEOUT) {
             ConnectNamedPipe(output_write_end, &output_write_end_overlapped);
@@ -423,7 +429,6 @@ int server_main(void) {
             input_state = CONNECTING;
         }
 
-        nob_log(NOB_INFO, "Server waiting");
         DWORD result = WaitForMultipleObjects(ARRAY_LEN(handles), handles, FALSE, INFINITE);
         if (result == WAIT_FAILED) {
             nob_log(NOB_ERROR, "Failed to wait for handle state, %s", win32_error_message(GetLastError()));
@@ -446,9 +451,11 @@ int server_main(void) {
         static_assert(ARRAY_LEN(handles) == 4);
         switch (index) {
             case SERVER_INPUT_INDEX: {
-                nob_log(NOB_INFO, "Server input event signaled");
                 if (!GetOverlappedResult(input_read_end, &input_read_end_overlapped, &bytes, FALSE)) {
-                    TODO("Handle input async result failed");
+                    nob_log(NOB_WARNING, "Failed to server input overlapped result, %s", win32_error_message(GetLastError()));
+                    DisconnectNamedPipe(input_read_end);
+                    input_state = UNCONNECTED;
+                    break;
                 }
                 if (input_state == CONNECTING) {
                     input_state = CONNECTED;
@@ -466,20 +473,22 @@ int server_main(void) {
             } break;
 
             case SERVER_OUTPUT_INDEX: {
-                nob_log(NOB_INFO, "Server output event signaled");
                 if (!GetOverlappedResult(output_write_end, &output_write_end_overlapped, &bytes, FALSE)) {
                     TODO("Handle input async result failed");
                 }
-                if (input_state == CONNECTING) {
-                    input_state = CONNECTED;
+                if (output_state == CONNECTING) {
+                    output_state = CONNECTED;
                     nob_log(NOB_INFO, "Output pipe connected");
+                    if (!start_read(output_buffer, ARRAY_LEN(output_buffer), thread_output_read_end, &thread_output_overlapped, output_write_end)) {
+                        break;
+                    }
                 }
             } break;
 
             case THREAD_OUTPUT_INDEX: {
-                nob_log(NOB_INFO, "Thread output event signaled");
                 if (!GetOverlappedResult(thread_output_read_end, &thread_output_overlapped, &bytes, FALSE)) {
-                    TODO("Handle input async result failed");
+                    nob_log(NOB_WARNING, "Failed to thread output overlapped result, %s", win32_error_message(GetLastError()));
+                    break;
                 }
                 if (output_state == CONNECTED) {
                     if (!WriteFile(output_write_end, output_buffer, bytes, NULL, NULL)) {
@@ -528,7 +537,7 @@ DWORD WINAPI client_output_reader(void *arg) {
     );
     do {
         if (server_output == INVALID_HANDLE_VALUE) {
-            nob_log(NOB_ERROR, "Failed to connect write end to read end, %s", win32_error_message(GetLastError()));
+            nob_log(NOB_ERROR, "Failed to connect to server output, (%d) %s", GetLastError(), win32_error_message(GetLastError()));
             break;
         }
 
@@ -538,20 +547,18 @@ DWORD WINAPI client_output_reader(void *arg) {
         DWORD bytes_read = 0;
         while (true) {
             if (!ReadFile(server_output, buffer, ARRAY_LEN(buffer), &bytes_read, NULL)) {
-                nob_log(NOB_ERROR, "Failed to read output from server, %s", win32_error_message(GetLastError()));
                 break;
             }
             if (bytes_read == 0) {
                 break;
             }
-            nob_log(NOB_INFO, "Read %d", bytes_read);
             if (!WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), buffer, bytes_read, NULL, NULL)) {
                 break;
             }
         }
     } while (false);
 
-    CloseHandle(server_output);
+    if (server_output != INVALID_HANDLE_VALUE) CloseHandle(server_output);
 
     FreeConsole();
     nob_log(NOB_INFO, "Client reader exited");
@@ -573,6 +580,21 @@ int client_main(void) {
         return 1;
     }
 
+    HANDLE server_input = CreateFileA(
+        SERVER_STDIN_PIPE_NAME,
+        GENERIC_WRITE,
+        0,
+        NULL,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        NULL
+    );
+    if (server_input == INVALID_HANDLE_VALUE) {
+        nob_log(NOB_ERROR, "Failed to connect to server input, (%d) %s", GetLastError(), win32_error_message(GetLastError()));
+        return 1;
+    }
+    nob_log(NOB_INFO, "Server input connected");
+
     DWORD reader_thread_id = 0;
     HANDLE thread_handle = CreateThread(
             NULL,                       // default security attributes
@@ -585,22 +607,6 @@ int client_main(void) {
         nob_log(NOB_ERROR, "Failed to create client reader thread, %s", win32_error_message(GetLastError()));
         return 1;
     }
-    nob_log(NOB_INFO, "Client reader thread created");
-
-    HANDLE server_input = CreateFileA(
-        SERVER_STDIN_PIPE_NAME,
-        GENERIC_WRITE,
-        0,
-        NULL,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL
-    );
-    if (server_input == INVALID_HANDLE_VALUE) {
-        nob_log(NOB_ERROR, "Failed to connect write end to read end, %s", win32_error_message(GetLastError()));
-        return 1;
-    }
-    nob_log(NOB_INFO, "Server input connected");
 
     char buffer[PIPE_BUFFER_SIZE] = {0};
     DWORD bytes_read = 0;
@@ -612,7 +618,6 @@ int client_main(void) {
         if (bytes_read == 0) {
             break;
         }
-        nob_log(NOB_INFO, "Read %d", bytes_read);
         if (!WriteFile(server_input, buffer, bytes_read, NULL, NULL)) {
             break;
         }
