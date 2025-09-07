@@ -391,6 +391,7 @@ int server_main(void) {
     char output_buffer[PIPE_BUFFER_SIZE] = {0};
 
     bool running = true;
+    bool reset_connection = false;
 
     while (running) {
         while (output_state == UNCONNECTED && WaitForSingleObject(thread_handle, 10) == WAIT_TIMEOUT) {
@@ -452,29 +453,32 @@ int server_main(void) {
         switch (index) {
             case SERVER_INPUT_INDEX: {
                 if (!GetOverlappedResult(input_read_end, &input_read_end_overlapped, &bytes, FALSE)) {
-                    nob_log(NOB_WARNING, "Failed to server input overlapped result, %s", win32_error_message(GetLastError()));
-                    DisconnectNamedPipe(input_read_end);
-                    input_state = UNCONNECTED;
+                    nob_log(NOB_WARNING, "Failed to get server input overlapped result, %s (%d)", win32_error_message(GetLastError()), GetLastError());
+                    reset_connection = true;
                     break;
                 }
                 if (input_state == CONNECTING) {
                     input_state = CONNECTED;
                     nob_log(NOB_INFO, "Input pipe connected");
                 } else if (bytes == 0) {
-                    TODO("Handle read 0 bytes");
+                    reset_connection = true;
+                    break;
                 } else if (!WriteFile(thread_input_write_end, input_buffer, bytes*sizeof(*input_buffer), NULL, NULL)) {
                     nob_log(NOB_ERROR, "Failed to write input to process handler, %s", win32_error_message(GetLastError()));
                     break;
                 }
 
                 if (!start_read(input_buffer, ARRAY_LEN(input_buffer), input_read_end, &input_read_end_overlapped, thread_input_write_end)) {
-                    TODO("Handle start read failed");
+                    reset_connection = true;
+                    break;
                 }
             } break;
 
             case SERVER_OUTPUT_INDEX: {
                 if (!GetOverlappedResult(output_write_end, &output_write_end_overlapped, &bytes, FALSE)) {
-                    TODO("Handle input async result failed");
+                    nob_log(NOB_WARNING, "Failed to connect to client output, %s (%d)", win32_error_message(GetLastError()), GetLastError());
+                    reset_connection = true;
+                    break;
                 }
                 if (output_state == CONNECTING) {
                     output_state = CONNECTED;
@@ -487,12 +491,14 @@ int server_main(void) {
 
             case THREAD_OUTPUT_INDEX: {
                 if (!GetOverlappedResult(thread_output_read_end, &thread_output_overlapped, &bytes, FALSE)) {
-                    nob_log(NOB_WARNING, "Failed to thread output overlapped result, %s", win32_error_message(GetLastError()));
+                    nob_log(NOB_WARNING, "Failed to get process handler output overlapped result, %s", win32_error_message(GetLastError()));
                     break;
                 }
                 if (output_state == CONNECTED) {
                     if (!WriteFile(output_write_end, output_buffer, bytes, NULL, NULL)) {
-                        TODO("Handle write output failed");
+                        nob_log(NOB_WARNING, "Failed to write to client, %s (%d)", win32_error_message(GetLastError()), GetLastError());
+                        reset_connection = true;
+                        break;
                     }
                 } else {
                     nob_log(NOB_WARNING, "Output not connected");
@@ -507,6 +513,15 @@ int server_main(void) {
                 nob_log(NOB_INFO, "Process thread handler exited");
                 running = false;
             } break;
+        }
+
+        if (reset_connection) {
+            reset_connection = false;
+            DisconnectNamedPipe(input_read_end);
+            DisconnectNamedPipe(output_write_end);
+            input_state = UNCONNECTED;
+            output_state = UNCONNECTED;
+            nob_log(NOB_INFO, "Client connection reset");
         }
     }
 
