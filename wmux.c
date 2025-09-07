@@ -392,6 +392,7 @@ int server_main(void) {
     size_t unsent_output_buffer_length = 0;
     const size_t to_be_erased_when_output_full = min(max(ARRAY_LEN(output_buffer) / 16, 2), ARRAY_LEN(output_buffer));
     bool started_reading_process_output = false;
+    bool unsent_output_flush_on_reconnected = false;
 
     bool running = true;
     bool reset_connection = false;
@@ -488,10 +489,26 @@ int server_main(void) {
                     nob_log(NOB_INFO, "Output pipe connected");
 
                     if (started_reading_process_output) {
+                        if (unsent_output_buffer_length == 0) {
+                            break;
+                        }
+
+                        if (!WriteFile(output_write_end, output_buffer, (DWORD)unsent_output_buffer_length, NULL, NULL)) {
+                            nob_log(NOB_WARNING, "Failed to write to client, %s (%d)", win32_error_message(GetLastError()), GetLastError());
+                            reset_connection = true;
+                        }
+
+                        unsent_output_flush_on_reconnected = true;
                         break;
                     }
 
-                    assert(unsent_output_buffer_length == 0);
+                    if (unsent_output_buffer_length > 0 && !WriteFile(output_write_end, output_buffer, (DWORD)unsent_output_buffer_length, NULL, NULL)) {
+                        nob_log(NOB_WARNING, "Failed to write to client, %s (%d)", win32_error_message(GetLastError()), GetLastError());
+                        reset_connection = true;
+                        break;
+                    }
+
+                    unsent_output_buffer_length = 0;
                     if (!start_read(output_buffer, ARRAY_LEN(output_buffer), thread_output_read_end, &thread_output_overlapped, output_write_end)) {
                         break;
                     }
@@ -501,20 +518,26 @@ int server_main(void) {
             } break;
 
             case THREAD_OUTPUT_INDEX: {
+                started_reading_process_output = false;
+
                 if (!GetOverlappedResult(thread_output_read_end, &thread_output_overlapped, &bytes, FALSE)) {
                     nob_log(NOB_WARNING, "Failed to get process handler output overlapped result, %s", win32_error_message(GetLastError()));
                     break;
                 }
 
-                started_reading_process_output = false;
-
                 if (output_state == CONNECTED) {
+                    size_t start_index = 0;
                     if (unsent_output_buffer_length > 0) {
-                        bytes += (DWORD)unsent_output_buffer_length;
+                        if (unsent_output_flush_on_reconnected) {
+                            start_index = unsent_output_buffer_length;
+                        } else {
+                            bytes += (DWORD)unsent_output_buffer_length;
+                        }
                         unsent_output_buffer_length = 0;
+                        unsent_output_flush_on_reconnected = false;
                     }
 
-                    if (!WriteFile(output_write_end, output_buffer, bytes, NULL, NULL)) {
+                    if (!WriteFile(output_write_end, output_buffer + start_index, bytes, NULL, NULL)) {
                         nob_log(NOB_WARNING, "Failed to write to client, %s (%d)", win32_error_message(GetLastError()), GetLastError());
                         reset_connection = true;
                     }
