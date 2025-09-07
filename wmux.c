@@ -16,11 +16,14 @@ static LPCTSTR POWERSHELL_STDERR_PIPE_NAME = "\\\\.\\pipe\\powershell_stderr";
 
 typedef struct {
     HANDLE out;
+    HANDLE in;
+    PROCESS_INFORMATION process;
     OVERLAPPED out_overlapped;
-} ReaderArgs;
+} ProcessEventHandlerArg;
 
 #define STDOUT_INDEX 0
-#define STDERR_INDEX 1
+#define PROCESS_INDEX 1
+#define PROCESS_THREAD_INDEX 2
 
 bool start_read(char *buffer, size_t buffer_size, HANDLE handle, OVERLAPPED *overlapped, HANDLE out_handle) {
     DWORD bytes = 0;
@@ -44,11 +47,13 @@ bool start_read(char *buffer, size_t buffer_size, HANDLE handle, OVERLAPPED *ove
     return true;
 }
 
-static ReaderArgs reader_args = {0};
-DWORD WINAPI reader_thread(void *_arg) {
-    ReaderArgs* arg = _arg;
+static ProcessEventHandlerArg process_event_handler_arg = {0};
+DWORD WINAPI process_event_handler(void *_arg) {
+    ProcessEventHandlerArg* arg = _arg;
     const HANDLE handles[] = {
-        [STDOUT_INDEX] = arg->out_overlapped.hEvent
+        [STDOUT_INDEX] = arg->out_overlapped.hEvent,
+        [PROCESS_INDEX] = arg->process.hProcess
+        // [PROCESS_THREAD_INDEX] = arg->process.hThread,
     };
     char stdout_buffer[PIPE_BUFFER_SIZE] = {0};
 
@@ -60,7 +65,7 @@ DWORD WINAPI reader_thread(void *_arg) {
     while (true) {
         DWORD result = WaitForMultipleObjects(ARRAY_LEN(handles), handles, FALSE, INFINITE);
         if (result == WAIT_FAILED) {
-            nob_log(NOB_ERROR, "Failed to wait for output from named pipes, %s", win32_error_message(GetLastError()));
+            nob_log(NOB_ERROR, "Failed to wait for handle state, %s", win32_error_message(GetLastError()));
             break;
         }
         if (result >= WAIT_ABANDONED_0) {
@@ -95,11 +100,22 @@ DWORD WINAPI reader_thread(void *_arg) {
             continue;
         }
 
+        if (index == PROCESS_INDEX) {
+            DWORD exit_code = (DWORD)-1;
+            GetExitCodeProcess(arg->process.hProcess, &exit_code);
+            nob_log(NOB_INFO, "Powershell process exited, code: (%d)", exit_code);
+            break;
+        }
+
         UNREACHABLE("Unknown index");
     }
 
+    CloseHandle(arg->in);
     CloseHandle(arg->out_overlapped.hEvent);
     CloseHandle(arg->out);
+    CloseHandle(arg->process.hThread);
+    CloseHandle(arg->process.hProcess);
+    nob_log(NOB_INFO, "Process event handler thread exited");
     return 0;
 }
 
@@ -295,16 +311,18 @@ int main(int argc, char **argv) {
     // CloseHandle(write_stderr);
     // CloseHandle(read_stdin);
 
-    reader_args.out = read_stdout;
-    reader_args.out_overlapped = stdout_overlapped;
+    process_event_handler_arg.in = write_stdin;
+    process_event_handler_arg.out = read_stdout;
+    process_event_handler_arg.process = process_info;
+    process_event_handler_arg.out_overlapped = stdout_overlapped;
 
     DWORD reader_thread_id = 0;
     HANDLE thread_handle = CreateThread(
-            NULL,                // default security attributes
-            0,                   // use default stack size  
-            reader_thread,       // thread function name
-            &reader_args,        // argument to thread function 
-            0,                   // use default creation flags 
+            NULL,                       // default security attributes
+            0,                          // use default stack size  
+            process_event_handler,      // thread function name
+            &process_event_handler_arg, // argument to thread function 
+            0,                          // use default creation flags 
             &reader_thread_id);
 
     char buffer[PIPE_BUFFER_SIZE] = {0};
@@ -323,10 +341,6 @@ int main(int argc, char **argv) {
             break;
         }
     }
-
-    WaitForSingleObject(process_info.hProcess, INFINITE);
-    CloseHandle(process_info.hProcess);
-    CloseHandle(process_info.hThread);
 
     WaitForSingleObject(thread_handle, INFINITE);
     CloseHandle(thread_handle);
