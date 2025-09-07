@@ -116,6 +116,9 @@ DWORD WINAPI process_event_handler(void *_arg) {
     CloseHandle(arg->process.hThread);
     CloseHandle(arg->process.hProcess);
     nob_log(NOB_INFO, "Process event handler thread exited");
+
+    // NOTE: do this to exit on `exit` command ^^, a little hacky but fine for now
+    FreeConsole();
     return 0;
 }
 
@@ -244,20 +247,14 @@ int main(int argc, char **argv) {
     DWORD console_mode = 0;
     HANDLE console_input = GetStdHandle(STD_INPUT_HANDLE);
     HANDLE console_output = GetStdHandle(STD_OUTPUT_HANDLE);
-    HANDLE console_error = GetStdHandle(STD_ERROR_HANDLE);
     if (!GetConsoleMode(console_input, &console_mode) ||
-        !SetConsoleMode(console_input, (console_mode & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT/* | ENABLE_PROCESSED_INPUT */)) | ENABLE_VIRTUAL_TERMINAL_INPUT | ENABLE_PROCESSED_INPUT)) {
+        !SetConsoleMode(console_input, (console_mode & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT)) {
         nob_log(NOB_ERROR, "Failed to set input console mode, %s", win32_error_message(GetLastError()));
         return 1;
     }
     if (!GetConsoleMode(console_output, &console_mode) ||
         !SetConsoleMode(console_output, console_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT)) {
         nob_log(NOB_ERROR, "Failed to set output console mode, %s", win32_error_message(GetLastError()));
-        return 1;
-    }
-    if (!GetConsoleMode(console_error, &console_mode) ||
-        !SetConsoleMode(console_error, console_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT)) {
-        nob_log(NOB_ERROR, "Failed to set error console mode, %s", win32_error_message(GetLastError()));
         return 1;
     }
 
