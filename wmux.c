@@ -11,8 +11,8 @@
 #include <fcntl.h>
 
 #define PIPE_BUFFER_SIZE 4096
-static LPCTSTR POWERSHELL_STDOUT_PIPE_NAME = "\\\\.\\pipe\\powershell_stdout";
-static LPCTSTR POWERSHELL_STDERR_PIPE_NAME = "\\\\.\\pipe\\powershell_stderr";
+static const char *POWERSHELL_STDOUT_PIPE_NAME = "\\\\.\\pipe\\powershell_stdout";
+static const char *POWERSHELL_STDERR_PIPE_NAME = "\\\\.\\pipe\\powershell_stderr";
 
 typedef struct {
     HANDLE out;
@@ -337,7 +337,7 @@ int main(int argc, char **argv) {
         }
         // nob_log(NOB_INFO, "Read %d input", read_count);
         if (!WriteFile(write_stdin, buffer, read_count*sizeof(*buffer), NULL, NULL)) {
-            nob_log(NOB_ERROR, "Failed to write to powershell, (%d) %s", GetLastError(), win32_error_message(GetLastError()));
+            // nob_log(NOB_ERROR, "Failed to write to powershell, (%d) %s", GetLastError(), win32_error_message(GetLastError()));
             break;
         }
     }
