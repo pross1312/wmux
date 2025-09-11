@@ -779,27 +779,55 @@ int client_main(char *server_command_line) {
     return 0;
 }
 
+bool setup_logger(const char *in_mode) {
+    char path[MAX_PATH] = {0};
+    DWORD length = GetModuleFileNameA(NULL, path, MAX_PATH);
+    if (length == 0) {
+        nob_log(NOB_ERROR, "Failed to get executable path, %s", win32_error_message(GetLastError()));
+        return false;
+    }
+    Nob_String_View path_sv = nob_sv_from_parts(path, length);
+    assert(nob_sv_end_with(path_sv, ".exe"));
+    size_t i = path_sv.count-1;
+    for (; i != 0; i -= 1) {
+        if (path_sv.data[i] == '\\') {
+            i += 1;
+            break;
+        }
+    }
+    if (freopen(temp_sprintf("%.*swmux_%s.log", i, path_sv.data, in_mode), "a", stderr) == NULL) {
+        nob_log(NOB_ERROR, "Failed to reopen stderr for loggin", win32_error_message(GetLastError()));
+        return false;
+    }
+    return true;
+}
+
 int main(int argc, char **argv) {
-    nob_log(NOB_INFO, "%s started with pid: %d", GetCommandLineA(), GetCurrentProcessId());
     char *program_name = shift(argv, argc);
     char *server_command_line = temp_sprintf("\"%s\" \"server\"", program_name);
+    const char *mode;
     if (argc == 0) {
-        return client_main(server_command_line);
+        mode = "client";
+    } else {
+        mode = "server";
+    }
+    if (!setup_logger(mode)) {
+        return 1;
     }
 
-    char *mode = shift(argv, argc);
-    if (strcmp(mode, "server") == 0) {
-        return server_main();
-    }
-
+    nob_log(NOB_INFO, "%s started with pid: %d", GetCommandLineA(), GetCurrentProcessId());
     if (strcmp(mode, "client") == 0) {
         return client_main(server_command_line);
     }
 
-    TODO("Usage instruction");
+    if (strcmp(mode, "server") == 0) {
+        return server_main();
+    }
+
+    TODO("Usage");
 }
 
-// [_] TODO: log to file for both client and server
 // [_] TODO: allow disconnect client with command/keybinding
 // [_] TODO: allow customize shell
 // [X] TODO: client check and start server if needed
+// [x] TODO: log to file for both client and server
