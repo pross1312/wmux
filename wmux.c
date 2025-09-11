@@ -159,17 +159,7 @@ bool create_async_connected_named_pipe(const char *name, HANDLE *out_read_end, O
     return false;
 }
 
-bool create_virtual_console(HPCON *virtual_console, LPPROC_THREAD_ATTRIBUTE_LIST *proc_thread_attribute_list, HANDLE output_handle, HANDLE input_handle) {
-    COORD console_size = {
-        .X = 120,
-        .Y = 30,
-    };
-
-    CONSOLE_SCREEN_BUFFER_INFO console_screen_info = {0};
-    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &console_screen_info)) {
-        console_size = console_screen_info.dwSize;
-    }
-
+bool create_virtual_console(HPCON *virtual_console, LPPROC_THREAD_ATTRIBUTE_LIST *proc_thread_attribute_list, HANDLE output_handle, HANDLE input_handle, COORD console_size) {
     HPCON console = {0};
     HRESULT result = S_OK;
     LPPROC_THREAD_ATTRIBUTE_LIST attribute_list = NULL;
@@ -216,7 +206,7 @@ typedef enum {
     UNCONNECTED
 } PipeState;
 
-int server_main(void) {
+int server_main(COORD console_init_size) {
     HANDLE console_input_read_end = INVALID_HANDLE_VALUE, console_input_write_end = INVALID_HANDLE_VALUE;
     if (!CreatePipe(&console_input_read_end, &console_input_write_end, NULL, 0)) {
         nob_log(NOB_ERROR, "Failed to setup console input pipe, %s", win32_error_message(GetLastError()));
@@ -231,7 +221,7 @@ int server_main(void) {
 
     HPCON virtual_console = {0};
     LPPROC_THREAD_ATTRIBUTE_LIST virtual_console_proc_thread_attribute_list = NULL;
-    if (!create_virtual_console(&virtual_console, &virtual_console_proc_thread_attribute_list, console_output_write_end, console_input_read_end)) {
+    if (!create_virtual_console(&virtual_console, &virtual_console_proc_thread_attribute_list, console_output_write_end, console_input_read_end, console_init_size)) {
         return 1;
     }
 
@@ -707,29 +697,49 @@ bool setup_logger(const char *in_mode) {
 
 int main(int argc, char **argv) {
     char *program_name = shift(argv, argc);
-    char *server_command_line = temp_sprintf("\"%s\" \"server\"", program_name);
+
     const char *mode;
     if (argc == 0) {
         mode = "client";
     } else {
-        mode = "server";
+        mode = shift(argv, argc);
     }
     if (!setup_logger(mode)) {
         return 1;
     }
 
     nob_log(NOB_INFO, "%s started with pid: %d", GetCommandLineA(), GetCurrentProcessId());
+
+    CONSOLE_SCREEN_BUFFER_INFO console_screen_info = {0};
+    if (!GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &console_screen_info)) {
+        nob_log(NOB_ERROR, "Failed to get client console size, %s", win32_error_message(GetLastError()));
+    }
+    nob_log(NOB_INFO, "Client start with console size %dx%d", console_screen_info.dwSize.X, console_screen_info.dwSize.Y);
+    char *server_command_line = temp_sprintf("\"%s\" \"server\" %d %d", program_name, console_screen_info.dwSize.X, console_screen_info.dwSize.Y);
+
     if (strcmp(mode, "client") == 0) {
         return client_main(server_command_line);
     }
 
+    if (argc <= 1) {
+        TODO("Usage");
+    }
+
+    for (int i = 0; i < argc; i++) {
+        nob_log(NOB_INFO, "Arg %d: %s", i, argv[i]);
+    }
+    short console_width = (short)atoi(shift(argv, argc));
+    short console_height = (short)atoi(shift(argv, argc));
+    nob_log(NOB_INFO, "Server started with console size %dx%d", console_width, console_height);
     if (strcmp(mode, "server") == 0) {
-        return server_main();
+        return server_main((COORD){.X = console_width, .Y = console_height});
     }
 
     TODO("Usage");
 }
 
+// [_] TODO: handle resize
+//      [X] TODO: set server virtual console initial size to be client console initial size
 // [_] TODO: allow disconnect client with command/keybinding
 // [_] TODO: allow customize shell
 // [X] TODO: client check and start server if needed
