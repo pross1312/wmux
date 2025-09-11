@@ -14,11 +14,6 @@
 static const char *POWERSHELL_STDOUT_PIPE_NAME = "\\\\.\\pipe\\powershell_stdout";
 static const char *SERVER_STDIN_PIPE_NAME = "\\\\.\\pipe\\server_stdin";
 static const char *SERVER_STDOUT_PIPE_NAME = "\\\\.\\pipe\\server_stdout";
-static const char *THREAD_OUTPUT_PIPE_NAME = "\\\\.\\pipe\\thread_stdout";
-
-#define STDOUT_INDEX 0
-#define PROCESS_INDEX 1
-#define PROCESS_THREAD_INDEX 2
 
 #define SERVER_INPUT_INDEX 0
 #define PROCESS_HANDLE_INDEX 1
@@ -742,6 +737,8 @@ int main(int argc, char **argv) {
 //      [X] TODO: set server virtual console initial size to be client console initial size
 // [_] TODO: allow disconnect client with command/keybinding
 // [_] TODO: allow customize shell
+// [_] TODO: usage
+// [_] TODO: switch to unicode (wstr)
 // [X] TODO: client check and start server if needed
 // [x] TODO: log to file for both client and server
 // [x] TODO: remove unnecessary process handler thread in server
