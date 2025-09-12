@@ -832,6 +832,7 @@ int main(int argc, char **argv) {
     TODO("Usage");
 }
 
+// [_] TODO: buffer output from powershell and send them to client on connected
 // [_] TODO: allow customize shell
 // [_] TODO: usage
 // [_] TODO: switch to unicode (wstr)
