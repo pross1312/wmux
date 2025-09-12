@@ -20,6 +20,8 @@ static const char *SERVER_STDOUT_PIPE_NAME = "\\\\.\\pipe\\server_stdout";
 #define CONSOLE_OUTPUT_INDEX 2
 #define SERVER_OUTPUT_INDEX 3
 
+#define DETACHED_CODE 4 // CTRL-D
+
 bool start_read(char *buffer, size_t buffer_size, HANDLE handle, OVERLAPPED *overlapped, HANDLE out_handle) {
     DWORD bytes = 0;
     while (true) {
@@ -346,6 +348,14 @@ int server_main(COORD console_init_size) {
                 } else if (bytes == 0) {
                     reset_connection = true;
                     break;
+                } else if (bytes == sizeof(COORD) + 2 && input_buffer[0] == 0 && input_buffer[sizeof(COORD)+1] == 0) {
+                    COORD new_size = *(COORD*)&input_buffer[1];
+                    HRESULT resize_result = ResizePseudoConsole(virtual_console, new_size);
+                    if (resize_result != S_OK) {
+                        nob_log(NOB_WARNING, "Failed to resize virtual console (%d)", resize_result);
+                    } else {
+                        nob_log(NOB_INFO, "Resize virtual console -> %dx%d", new_size.X, new_size.Y);
+                    }
                 } else if (!WriteFile(console_input_write_end, input_buffer, bytes*sizeof(*input_buffer), NULL, NULL)) {
                     nob_log(NOB_ERROR, "Failed to write input to process, %s", win32_error_message(GetLastError()));
                     break;
@@ -485,7 +495,7 @@ int server_main(COORD console_init_size) {
 }
 
 DWORD WINAPI client_output_reader(void *arg) {
-    UNUSED(arg);
+    HANDLE detached_event = (HANDLE)arg;
 
     HANDLE server_output = CreateFileA(
         SERVER_STDOUT_PIPE_NAME,
@@ -493,33 +503,87 @@ DWORD WINAPI client_output_reader(void *arg) {
         0,
         NULL,
         OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
+        FILE_FLAG_OVERLAPPED,
         NULL
     );
+
+    OVERLAPPED server_output_overlapped = {0};
+    server_output_overlapped.hEvent = INVALID_HANDLE_VALUE;
     do {
         if (server_output == INVALID_HANDLE_VALUE) {
             nob_log(NOB_ERROR, "Failed to connect to server output, (%d) %s", GetLastError(), win32_error_message(GetLastError()));
             break;
         }
 
+        server_output_overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+        if (server_output_overlapped.hEvent == INVALID_HANDLE_VALUE) {
+            nob_log(NOB_ERROR, "Failed to create async event for server output, %s", win32_error_message(GetLastError()));
+            break;
+        }
+        server_output_overlapped.Offset = 0;
+        server_output_overlapped.OffsetHigh = 0;
+
+
         nob_log(NOB_INFO, "Server output connected");
 
         char buffer[PIPE_BUFFER_SIZE] = {0};
         DWORD bytes_read = 0;
+
+        HANDLE console_out = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (!start_read(buffer, ARRAY_LEN(buffer), server_output, &server_output_overlapped, console_out)) {
+            break;
+        }
+
+        #define CLIENT_READER_DETACHED_EVENT_INDEX 0
+        #define CLIENT_READER_SERVER_OUTPUT_INDEX 1
+        HANDLE handles[] = {
+            [CLIENT_READER_DETACHED_EVENT_INDEX] = detached_event,
+            [CLIENT_READER_SERVER_OUTPUT_INDEX] = server_output_overlapped.hEvent,
+        };
+
         while (true) {
-            if (!ReadFile(server_output, buffer, ARRAY_LEN(buffer), &bytes_read, NULL)) {
+            DWORD result = WaitForMultipleObjects(ARRAY_LEN(handles), handles, FALSE, INFINITE);
+            if (result == WAIT_FAILED) {
+                nob_log(NOB_ERROR, "Failed to wait for handle state, %s", win32_error_message(GetLastError()));
                 break;
             }
-            if (bytes_read == 0) {
+            if (result >= WAIT_ABANDONED_0) {
+                TODO("Handle abandoned");
                 break;
             }
-            if (!WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), buffer, bytes_read, NULL, NULL)) {
+
+            int index = result - WAIT_OBJECT_0;
+            if (index < 0 || index >= (int)ARRAY_LEN(handles)) {
+                nob_log(NOB_ERROR, "Index out of range");
+                break;
+            }
+
+            if (index == CLIENT_READER_SERVER_OUTPUT_INDEX) {
+                if (!GetOverlappedResult(server_output, &server_output_overlapped, &bytes_read, FALSE)) {
+                    nob_log(NOB_ERROR, "Failed to get server output overlapped result, %s", win32_error_message(GetLastError()));
+                    break;
+                }
+
+                if (!WriteFile(console_out, buffer, bytes_read, NULL, NULL)) {
+                    break;
+                }
+
+                if (!start_read(buffer, ARRAY_LEN(buffer), server_output, &server_output_overlapped, console_out)) {
+                    break;
+                }
+                continue;
+            }
+
+            if (index == CLIENT_READER_DETACHED_EVENT_INDEX) {
+                nob_log(NOB_INFO, "Client reader received detached event");
                 break;
             }
         }
     } while (false);
 
+    if (server_output_overlapped.hEvent != INVALID_HANDLE_VALUE) CloseHandle(server_output_overlapped.hEvent);
     if (server_output != INVALID_HANDLE_VALUE) CloseHandle(server_output);
+    CloseHandle(detached_event);
 
     FreeConsole();
     nob_log(NOB_INFO, "Client reader exited");
@@ -579,6 +643,14 @@ bool start_server(char *command_line) {
     return true;
 }
 
+COORD get_console_size(void) {
+    CONSOLE_SCREEN_BUFFER_INFO console_screen_info = {0};
+    if (!GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &console_screen_info)) {
+        UNREACHABLE("Must be able to read console size");
+    }
+    return console_screen_info.dwSize;
+}
+
 int client_main(char *server_command_line) {
     DWORD console_mode = 0;
     HANDLE console_input = GetStdHandle(STD_INPUT_HANDLE);
@@ -632,12 +704,18 @@ int client_main(char *server_command_line) {
     } while (true);
     nob_log(NOB_INFO, "Server input connected");
 
+    HANDLE detached_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+    if (detached_event == INVALID_HANDLE_VALUE) {
+        nob_log(NOB_ERROR, "Failed to create shutdown event, %s (%d)", win32_error_message(GetLastError()), GetLastError());
+        return 1;
+    }
+
     DWORD reader_thread_id = 0;
     HANDLE thread_handle = CreateThread(
             NULL,                       // default security attributes
             0,                          // use default stack size
             client_output_reader,       // thread function name
-            NULL,                       // argument to thread function
+            detached_event,             // argument to thread function
             0,                          // use default creation flags
             &reader_thread_id);
     if (thread_handle == INVALID_HANDLE_VALUE) {
@@ -647,7 +725,10 @@ int client_main(char *server_command_line) {
 
     char buffer[PIPE_BUFFER_SIZE] = {0};
     DWORD bytes_read = 0;
+    COORD console_size = get_console_size();
+    size_t mark = temp_save();
     while (true) {
+        temp_rewind(mark);
         if (!ReadFile(console_input, buffer, ARRAY_LEN(buffer), &bytes_read, NULL)) {
             nob_log(NOB_ERROR, "Failed to read input from console, %s", win32_error_message(GetLastError()));
             break;
@@ -655,8 +736,27 @@ int client_main(char *server_command_line) {
         if (bytes_read == 0) {
             break;
         }
+        if (bytes_read == 1 && buffer[0] == DETACHED_CODE) {
+            SetEvent(detached_event);
+            break;
+        }
+
         if (!WriteFile(server_input, buffer, bytes_read, NULL, NULL)) {
             break;
+        }
+
+        COORD new_size = get_console_size();
+        if (console_size.X != new_size.X && console_size.Y != new_size.Y) {
+            nob_log(NOB_INFO, "Client size changed %dx%d -> %dx%d", console_size.X, console_size.Y, new_size.X, new_size.Y);
+            console_size = new_size;
+
+            assert(ARRAY_LEN(buffer) > sizeof(console_size) + 2);
+            buffer[0] = 0;
+            memcpy(&buffer[1], &console_size, sizeof(console_size));
+            buffer[sizeof(console_size)+1] = 0;
+            if (!WriteFile(server_input, buffer, sizeof(console_size)+2, NULL, NULL)) {
+                break;
+            }
         }
     }
 
@@ -705,14 +805,12 @@ int main(int argc, char **argv) {
 
     nob_log(NOB_INFO, "%s started with pid: %d", GetCommandLineA(), GetCurrentProcessId());
 
-    CONSOLE_SCREEN_BUFFER_INFO console_screen_info = {0};
-    if (!GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &console_screen_info)) {
-        nob_log(NOB_ERROR, "Failed to get client console size, %s", win32_error_message(GetLastError()));
-    }
-    nob_log(NOB_INFO, "Client start with console size %dx%d", console_screen_info.dwSize.X, console_screen_info.dwSize.Y);
-    char *server_command_line = temp_sprintf("\"%s\" \"server\" %d %d", program_name, console_screen_info.dwSize.X, console_screen_info.dwSize.Y);
-
     if (strcmp(mode, "client") == 0) {
+        COORD console_size = get_console_size();
+        nob_log(NOB_INFO, "Client start with console size %dx%d", console_size.X, console_size.Y);
+        char *server_command_line = temp_sprintf("\"%s\" \"server\" %d %d", program_name, console_size.X, console_size.Y);
+
+        temp_reset();
         return client_main(server_command_line);
     }
 
@@ -727,18 +825,19 @@ int main(int argc, char **argv) {
     short console_height = (short)atoi(shift(argv, argc));
     nob_log(NOB_INFO, "Server started with console size %dx%d", console_width, console_height);
     if (strcmp(mode, "server") == 0) {
+        temp_reset();
         return server_main((COORD){.X = console_width, .Y = console_height});
     }
 
     TODO("Usage");
 }
 
-// [_] TODO: handle resize
-//      [X] TODO: set server virtual console initial size to be client console initial size
-// [_] TODO: allow disconnect client with command/keybinding
 // [_] TODO: allow customize shell
 // [_] TODO: usage
 // [_] TODO: switch to unicode (wstr)
 // [X] TODO: client check and start server if needed
 // [x] TODO: log to file for both client and server
 // [x] TODO: remove unnecessary process handler thread in server
+// [X] TODO: handle resize
+//      [X] TODO: set server virtual console initial size to be client console initial size
+// [X] TODO: allow disconnect client with command/keybinding

@@ -13,8 +13,9 @@ int main(int argc, char **argv) {
 
     Cmd cmd = {0};
     cmd_append(&cmd, "cl");
+    cmd_append(&cmd, "/std:c17");
     cmd_append(&cmd, "/Wall");
-    cmd_append(&cmd, "/wd5045", "/wd4820");
+    cmd_append(&cmd, "/wd5045", "/wd4820", "/wd5105");
     cmd_append(&cmd, "/Fo:"OBJ_FOLDER);
     cmd_append(&cmd, "/Fe:"OUTPUT_FOLDER"wmux.exe");
     cmd_append(&cmd, "wmux.c");
