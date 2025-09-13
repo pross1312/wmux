@@ -10,7 +10,7 @@
 #include <ConsoleApi.h>
 #include <fcntl.h>
 
-#define PIPE_BUFFER_SIZE 4096
+#define PIPE_BUFFER_SIZE 256
 static const char *POWERSHELL_STDOUT_PIPE_NAME = "\\\\.\\pipe\\powershell_stdout";
 static const char *SERVER_STDIN_PIPE_NAME = "\\\\.\\pipe\\server_stdin";
 static const char *SERVER_STDOUT_PIPE_NAME = "\\\\.\\pipe\\server_stdout";
@@ -268,12 +268,13 @@ int server_main(COORD console_init_size) {
         [CONSOLE_OUTPUT_INDEX] = console_output_read_end_overlapped.hEvent,
     };
 
+
+    char preserve_buffer[PIPE_BUFFER_SIZE * 32] = {0};
+    size_t preserve_buffer_count = 0;
+
     char input_buffer[PIPE_BUFFER_SIZE] = {0};
     char output_buffer[PIPE_BUFFER_SIZE] = {0};
-    size_t unsent_output_buffer_length = 0;
-    const size_t to_be_erased_when_output_full = min(max(ARRAY_LEN(output_buffer) / 16, 2), ARRAY_LEN(output_buffer));
-    bool started_reading_process_output = false;
-    bool unsent_output_flush_on_reconnected = false;
+    bool no_client_before = true;
 
     bool running = true;
     bool reset_connection = false;
@@ -377,83 +378,49 @@ int server_main(COORD console_init_size) {
                     output_state = CONNECTED;
                     nob_log(NOB_INFO, "Output pipe connected");
 
-                    if (started_reading_process_output) {
-                        if (unsent_output_buffer_length == 0) {
-                            break;
-                        }
-
-                        if (!WriteFile(output_write_end, output_buffer, (DWORD)unsent_output_buffer_length, NULL, NULL)) {
-                            nob_log(NOB_WARNING, "Failed to write to client, %s (%d)", win32_error_message(GetLastError()), GetLastError());
-                            reset_connection = true;
-                        }
-
-                        unsent_output_flush_on_reconnected = true;
-                        break;
-                    }
-
-                    if (unsent_output_buffer_length > 0 && !WriteFile(output_write_end, output_buffer, (DWORD)unsent_output_buffer_length, NULL, NULL)) {
+                    if (preserve_buffer_count > 0 && !WriteFile(output_write_end, preserve_buffer, (DWORD)preserve_buffer_count, NULL, NULL)) {
                         nob_log(NOB_WARNING, "Failed to write to client, %s (%d)", win32_error_message(GetLastError()), GetLastError());
                         reset_connection = true;
+                    }
+
+                    if (no_client_before && !start_read(output_buffer, ARRAY_LEN(output_buffer), console_output_read_end, &console_output_read_end_overlapped, output_write_end)) {
                         break;
                     }
 
-                    unsent_output_buffer_length = 0;
-                    if (!start_read(output_buffer, ARRAY_LEN(output_buffer), console_output_read_end, &console_output_read_end_overlapped, output_write_end)) {
-                        break;
-                    }
-
-                    started_reading_process_output = true;
+                    no_client_before = false;
                 }
             } break;
 
             case CONSOLE_OUTPUT_INDEX: {
-                started_reading_process_output = false;
-
                 if (!GetOverlappedResult(console_output_read_end, &console_output_read_end_overlapped, &bytes, FALSE)) {
                     nob_log(NOB_WARNING, "Failed to get console output overlapped result, %s", win32_error_message(GetLastError()));
                     break;
                 }
 
-                if (output_state == CONNECTED) {
-                    size_t start_index = 0;
-                    if (unsent_output_buffer_length > 0) {
-                        if (unsent_output_flush_on_reconnected) {
-                            start_index = unsent_output_buffer_length;
-                        } else {
-                            bytes += (DWORD)unsent_output_buffer_length;
-                        }
-                        unsent_output_buffer_length = 0;
-                        unsent_output_flush_on_reconnected = false;
-                    }
-
-                    if (!WriteFile(output_write_end, output_buffer + start_index, bytes, NULL, NULL)) {
-                        nob_log(NOB_WARNING, "Failed to write to client, %s (%d)", win32_error_message(GetLastError()), GetLastError());
-                        reset_connection = true;
-                    }
-                } else {
-                    if (unsent_output_buffer_length + bytes <= ARRAY_LEN(output_buffer)) {
-                        unsent_output_buffer_length += bytes;
-                        nob_log(NOB_WARNING, "Output not connected, buffer it for later client");
-                    } else {
-                        nob_log(NOB_WARNING, "Output not connected, run out of space to buffer it");
-                    }
+                if (output_state == CONNECTED && !WriteFile(output_write_end, output_buffer, bytes, NULL, NULL)) {
+                    nob_log(NOB_WARNING, "Failed to write to client, %s (%d)", win32_error_message(GetLastError()), GetLastError());
+                    reset_connection = true;
                 }
 
-                if (unsent_output_buffer_length >= ARRAY_LEN(output_buffer)) {
-                    nob_log(NOB_WARNING, "Output buffer, erase %zu first bytes to make room for new output", to_be_erased_when_output_full);
-                    memmove(output_buffer, output_buffer + to_be_erased_when_output_full, unsent_output_buffer_length - to_be_erased_when_output_full);
-                    unsent_output_buffer_length -= to_be_erased_when_output_full;
+                if (preserve_buffer_count + bytes > ARRAY_LEN(preserve_buffer)) {
+                    size_t move_count = preserve_buffer_count + bytes - ARRAY_LEN(preserve_buffer);
+                    if (move_count > preserve_buffer_count) {
+                        move_count = preserve_buffer_count;
+                    }
+                    memmove(preserve_buffer, preserve_buffer + move_count, ARRAY_LEN(preserve_buffer) - move_count);
+                    preserve_buffer_count -= move_count;
                 }
 
-                if (!start_read(output_buffer + unsent_output_buffer_length,
-                                ARRAY_LEN(output_buffer) - unsent_output_buffer_length,
+                memcpy(preserve_buffer + preserve_buffer_count, output_buffer, bytes);
+                preserve_buffer_count += bytes;
+
+                if (!start_read(output_buffer,
+                                ARRAY_LEN(output_buffer),
                                 console_output_read_end,
                                 &console_output_read_end_overlapped,
                                 output_write_end)) {
                     break;
                 }
-
-                started_reading_process_output = true;
             } break;
 
             case PROCESS_HANDLE_INDEX: {
@@ -558,6 +525,12 @@ DWORD WINAPI client_output_reader(void *arg) {
 
         char buffer[PIPE_BUFFER_SIZE] = {0};
         DWORD bytes_read = 0;
+
+        const char* clear_seq = "\x1b[2J\x1b[H";
+        if (!WriteFile(console_output, clear_seq, (DWORD)strlen(clear_seq), NULL, NULL)) {
+            nob_log(NOB_ERROR, "Failed to clear sreen, %s", win32_error_message(GetLastError()));
+            break;
+        }
 
         if (!start_read(buffer, ARRAY_LEN(buffer), server_output, &server_output_overlapped, console_output)) {
             break;
@@ -853,7 +826,6 @@ int main(int argc, char **argv) {
     TODO("Usage");
 }
 
-// [_] TODO: buffer output from powershell and send them to client on connected
 // [_] TODO: allow customize shell
 // [_] TODO: usage
 // [_] TODO: switch to unicode (wstr)
@@ -863,3 +835,4 @@ int main(int argc, char **argv) {
 // [X] TODO: handle resize
 //      [X] TODO: set server virtual console initial size to be client console initial size
 // [X] TODO: allow disconnect client with command/keybinding
+// [X] TODO: buffer output from powershell and send them to client on connected
