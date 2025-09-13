@@ -658,7 +658,7 @@ bool start_server(char *command_line) {
         NULL,
         NULL,
         FALSE,
-        DETACHED_PROCESS,
+        DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB,
         NULL,
         NULL,
         &startup_info,
