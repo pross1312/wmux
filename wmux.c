@@ -20,7 +20,7 @@ static const char *SERVER_STDOUT_PIPE_NAME = "\\\\.\\pipe\\server_stdout";
 #define CONSOLE_OUTPUT_INDEX 2
 #define SERVER_OUTPUT_INDEX 3
 
-#define DETACHED_CODE 4 // CTRL-D
+#define DETACHED_CODE 24 // CTRL-X
 
 bool start_read(char *buffer, size_t buffer_size, HANDLE handle, OVERLAPPED *overlapped, HANDLE out_handle) {
     DWORD bytes = 0;
@@ -494,12 +494,13 @@ int server_main(COORD console_init_size) {
     return 0;
 }
 
+// NOTE: setup on main thread then reset on reader thread ^^
 static DWORD console_input_mode = 0;
 static DWORD console_output_mode = 0;
 bool setup_client_console_mode(void) {
     HANDLE console_input = GetStdHandle(STD_INPUT_HANDLE);
     if (!GetConsoleMode(console_input, &console_input_mode) ||
-        !SetConsoleMode(console_input, (console_input_mode & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT)) {
+        !SetConsoleMode(console_input, (console_input_mode & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT)))) {
         nob_log(NOB_ERROR, "Failed to set input console mode, %s", win32_error_message(GetLastError()));
         return false;
     }
