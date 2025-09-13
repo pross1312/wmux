@@ -494,9 +494,38 @@ int server_main(COORD console_init_size) {
     return 0;
 }
 
+static DWORD console_input_mode = 0;
+static DWORD console_output_mode = 0;
+bool setup_client_console_mode(void) {
+    HANDLE console_input = GetStdHandle(STD_INPUT_HANDLE);
+    if (!GetConsoleMode(console_input, &console_input_mode) ||
+        !SetConsoleMode(console_input, (console_input_mode & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT)) {
+        nob_log(NOB_ERROR, "Failed to set input console mode, %s", win32_error_message(GetLastError()));
+        return false;
+    }
+
+    HANDLE console_output = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (!GetConsoleMode(console_output, &console_output_mode) ||
+        !SetConsoleMode(console_output, console_output_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT)) {
+        nob_log(NOB_ERROR, "Failed to set output console mode, %s", win32_error_message(GetLastError()));
+        return false;
+    }
+    return true;
+}
+
+void reset_client_console_mode(void) {
+    if (!SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), console_output_mode)) {
+        nob_log(NOB_ERROR, "Failed to reset output console mode, %s", win32_error_message(GetLastError()));
+    }
+    if (!SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), console_input_mode)) {
+        nob_log(NOB_ERROR, "Failed to reset input console mode, %s", win32_error_message(GetLastError()));
+    }
+}
+
 DWORD WINAPI client_output_reader(void *arg) {
     HANDLE detached_event = (HANDLE)arg;
 
+    HANDLE console_output = GetStdHandle(STD_OUTPUT_HANDLE);
     HANDLE server_output = CreateFileA(
         SERVER_STDOUT_PIPE_NAME,
         GENERIC_READ,
@@ -529,8 +558,7 @@ DWORD WINAPI client_output_reader(void *arg) {
         char buffer[PIPE_BUFFER_SIZE] = {0};
         DWORD bytes_read = 0;
 
-        HANDLE console_out = GetStdHandle(STD_OUTPUT_HANDLE);
-        if (!start_read(buffer, ARRAY_LEN(buffer), server_output, &server_output_overlapped, console_out)) {
+        if (!start_read(buffer, ARRAY_LEN(buffer), server_output, &server_output_overlapped, console_output)) {
             break;
         }
 
@@ -564,11 +592,11 @@ DWORD WINAPI client_output_reader(void *arg) {
                     break;
                 }
 
-                if (!WriteFile(console_out, buffer, bytes_read, NULL, NULL)) {
+                if (!WriteFile(console_output, buffer, bytes_read, NULL, NULL)) {
                     break;
                 }
 
-                if (!start_read(buffer, ARRAY_LEN(buffer), server_output, &server_output_overlapped, console_out)) {
+                if (!start_read(buffer, ARRAY_LEN(buffer), server_output, &server_output_overlapped, console_output)) {
                     break;
                 }
                 continue;
@@ -585,6 +613,7 @@ DWORD WINAPI client_output_reader(void *arg) {
     if (server_output != INVALID_HANDLE_VALUE) CloseHandle(server_output);
     CloseHandle(detached_event);
 
+    reset_client_console_mode();
     FreeConsole();
     nob_log(NOB_INFO, "Client reader exited");
     return 0;
@@ -652,19 +681,10 @@ COORD get_console_size(void) {
 }
 
 int client_main(char *server_command_line) {
-    DWORD console_mode = 0;
+    if (!setup_client_console_mode()) {
+        return 1;
+    }
     HANDLE console_input = GetStdHandle(STD_INPUT_HANDLE);
-    HANDLE console_output = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (!GetConsoleMode(console_input, &console_mode) ||
-        !SetConsoleMode(console_input, (console_mode & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT)) {
-        nob_log(NOB_ERROR, "Failed to set input console mode, %s", win32_error_message(GetLastError()));
-        return 1;
-    }
-    if (!GetConsoleMode(console_output, &console_mode) ||
-        !SetConsoleMode(console_output, console_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT)) {
-        nob_log(NOB_ERROR, "Failed to set output console mode, %s", win32_error_message(GetLastError()));
-        return 1;
-    }
 
     HANDLE server_input = INVALID_HANDLE_VALUE;
     bool should_start_server = false;
