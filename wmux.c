@@ -500,14 +500,14 @@ static DWORD console_output_mode = 0;
 bool setup_client_console_mode(void) {
     HANDLE console_input = GetStdHandle(STD_INPUT_HANDLE);
     if (!GetConsoleMode(console_input, &console_input_mode) ||
-        !SetConsoleMode(console_input, (console_input_mode & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT)))) {
+        !SetConsoleMode(console_input, (console_input_mode & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT)) {
         nob_log(NOB_ERROR, "Failed to set input console mode, %s", win32_error_message(GetLastError()));
         return false;
     }
 
     HANDLE console_output = GetStdHandle(STD_OUTPUT_HANDLE);
     if (!GetConsoleMode(console_output, &console_output_mode) ||
-        !SetConsoleMode(console_output, console_output_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT)) {
+        !SetConsoleMode(console_output, console_output_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT | DISABLE_NEWLINE_AUTO_RETURN)) {
         nob_log(NOB_ERROR, "Failed to set output console mode, %s", win32_error_message(GetLastError()));
         return false;
     }
