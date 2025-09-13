@@ -334,7 +334,7 @@ int server_main(COORD console_init_size) {
         ResetEvent(handles[index]);
         DWORD bytes = 0;
 
-        static_assert(ARRAY_LEN(handles) == 4);
+        static_assert(ARRAY_LEN(handles) == 4, "Change here too!!!");
         switch (index) {
             case SERVER_INPUT_INDEX: {
                 if (!GetOverlappedResult(input_read_end, &input_read_end_overlapped, &bytes, FALSE)) {
