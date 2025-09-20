@@ -230,7 +230,7 @@ int server_main(COORD console_init_size) {
     PROCESS_INFORMATION process_info = {0};
     BOOL success = CreateProcessA(
         NULL,
-        "powershell -NoLogo -InputFormat Text -OutputFormat Text",
+        "powershell -NoLogo",
         NULL,
         NULL,
         FALSE,
@@ -464,28 +464,55 @@ int server_main(COORD console_init_size) {
 // NOTE: setup on main thread then reset on reader thread ^^
 static DWORD console_input_mode = 0;
 static DWORD console_output_mode = 0;
+static UINT console_output_cp = 0;
+static UINT console_input_cp = 0;
+const static UINT UTF8_CODEPOINT = 65001;
 bool setup_client_console_mode(void) {
     HANDLE console_input = GetStdHandle(STD_INPUT_HANDLE);
     if (!GetConsoleMode(console_input, &console_input_mode) ||
-        !SetConsoleMode(console_input, (console_input_mode & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT)) {
+        !SetConsoleMode(console_input, ENABLE_VIRTUAL_TERMINAL_INPUT)) {
         nob_log(NOB_ERROR, "Failed to set input console mode, %s", win32_error_message(GetLastError()));
         return false;
     }
 
     HANDLE console_output = GetStdHandle(STD_OUTPUT_HANDLE);
     if (!GetConsoleMode(console_output, &console_output_mode) ||
-        !SetConsoleMode(console_output, console_output_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT | DISABLE_NEWLINE_AUTO_RETURN)) {
+        !SetConsoleMode(console_output, ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT | DISABLE_NEWLINE_AUTO_RETURN)) {
         nob_log(NOB_ERROR, "Failed to set output console mode, %s", win32_error_message(GetLastError()));
+        return false;
+    }
+    console_output_cp = GetConsoleOutputCP();
+    if (console_output_cp == 0) {
+        nob_log(NOB_ERROR, "Failed to get console output codepoint, %s", win32_error_message(GetLastError()));
+        return false;
+    }
+    if (!SetConsoleOutputCP(UTF8_CODEPOINT)) {
+        nob_log(NOB_ERROR, "Failed to set console output codepoint to (%d), %s", UTF8_CODEPOINT, win32_error_message(GetLastError()));
+        return false;
+    }
+    console_input_cp = GetConsoleCP();
+    if (console_input_cp == 0) {
+        nob_log(NOB_ERROR, "Failed to get console input codepoint, %s", win32_error_message(GetLastError()));
+        return false;
+    }
+    if (!SetConsoleCP(UTF8_CODEPOINT)) {
+        nob_log(NOB_ERROR, "Failed to set console input codepoint to (%d), %s", UTF8_CODEPOINT, win32_error_message(GetLastError()));
         return false;
     }
     return true;
 }
 
 void reset_client_console_mode(void) {
-    if (!SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), console_output_mode)) {
+    if (console_input_cp != 0 && !SetConsoleCP(console_input_cp)) {
+        nob_log(NOB_ERROR, "Failed to reset console input codepoint to (%d), %s", console_input_cp, win32_error_message(GetLastError()));
+    }
+    if (console_output_cp != 0 && !SetConsoleOutputCP(console_output_cp)) {
+        nob_log(NOB_ERROR, "Failed to reset console output codepoint to (%d), %s", console_output_cp, win32_error_message(GetLastError()));
+    }
+    if (console_output_mode != 0 && !SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), console_output_mode)) {
         nob_log(NOB_ERROR, "Failed to reset output console mode, %s", win32_error_message(GetLastError()));
     }
-    if (!SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), console_input_mode)) {
+    if (console_input_mode != 0 && !SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), console_input_mode)) {
         nob_log(NOB_ERROR, "Failed to reset input console mode, %s", win32_error_message(GetLastError()));
     }
 }
@@ -656,6 +683,7 @@ COORD get_console_size(void) {
 
 int client_main(char *server_command_line) {
     if (!setup_client_console_mode()) {
+        reset_client_console_mode();
         return 1;
     }
     HANDLE console_input = GetStdHandle(STD_INPUT_HANDLE);
@@ -836,3 +864,4 @@ int main(int argc, char **argv) {
 //      [X] TODO: set server virtual console initial size to be client console initial size
 // [X] TODO: allow disconnect client with command/keybinding
 // [X] TODO: buffer output from powershell and send them to client on connected
+// [X] TODO: fix codepoint, vim, resize issue
