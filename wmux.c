@@ -11,9 +11,11 @@
 #include <fcntl.h>
 
 #define PIPE_BUFFER_SIZE 256
-static const char *POWERSHELL_STDOUT_PIPE_NAME = "\\\\.\\pipe\\powershell_stdout";
-static const char *SERVER_STDIN_PIPE_NAME = "\\\\.\\pipe\\server_stdin";
-static const char *SERVER_STDOUT_PIPE_NAME = "\\\\.\\pipe\\server_stdout";
+static const char * const POWERSHELL_STDOUT_PIPE_NAME = "\\\\.\\pipe\\powershell_stdout";
+static const char * const SERVER_STDIN_PIPE_NAME = "\\\\.\\pipe\\server_stdin";
+static const char * const SERVER_STDOUT_PIPE_NAME = "\\\\.\\pipe\\server_stdout";
+static const char * const DISABLE_WIN32_INPUT_MODE = "\x1b[?9001l";
+static const char * const ENABLE_WIN32_INPUT_MODE = "\x1b[?9001h";
 
 #define SERVER_INPUT_INDEX 0
 #define PROCESS_HANDLE_INDEX 1
@@ -553,7 +555,7 @@ DWORD WINAPI client_output_reader(void *arg) {
         char buffer[PIPE_BUFFER_SIZE] = {0};
         DWORD bytes_read = 0;
 
-        const char* clear_seq = "\x1b[2J\x1b[H";
+        const char* clear_seq = "\x1b[2J";
         if (!WriteFile(console_output, clear_seq, (DWORD)strlen(clear_seq), NULL, NULL)) {
             nob_log(NOB_ERROR, "Failed to clear sreen, %s", win32_error_message(GetLastError()));
             break;
@@ -569,6 +571,8 @@ DWORD WINAPI client_output_reader(void *arg) {
             [CLIENT_READER_DETACHED_EVENT_INDEX] = detached_event,
             [CLIENT_READER_SERVER_OUTPUT_INDEX] = server_output_overlapped.hEvent,
         };
+
+        bool first = true;
 
         while (true) {
             DWORD result = WaitForMultipleObjects(ARRAY_LEN(handles), handles, FALSE, INFINITE);
@@ -595,6 +599,12 @@ DWORD WINAPI client_output_reader(void *arg) {
 
                 if (!WriteFile(console_output, buffer, bytes_read, NULL, NULL)) {
                     break;
+                }
+
+                if (first && !WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), DISABLE_WIN32_INPUT_MODE, (DWORD)strlen(DISABLE_WIN32_INPUT_MODE), NULL, NULL)) {
+                    nob_log(NOB_WARNING, "Failed to disable win32 input mode");
+                } else {
+                    first = false;
                 }
 
                 if (!start_read(buffer, ARRAY_LEN(buffer), server_output, &server_output_overlapped, console_output)) {
@@ -840,9 +850,6 @@ int main(int argc, char **argv) {
         TODO("Usage");
     }
 
-    for (int i = 0; i < argc; i++) {
-        nob_log(NOB_INFO, "Arg %d: %s", i, argv[i]);
-    }
     short console_width = (short)atoi(shift(argv, argc));
     short console_height = (short)atoi(shift(argv, argc));
     nob_log(NOB_INFO, "Server started with console size %dx%d", console_width, console_height);
