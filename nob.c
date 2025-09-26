@@ -15,10 +15,12 @@ int main(int argc, char **argv) {
     cmd_append(&cmd, "cl");
     cmd_append(&cmd, "/std:c17");
     cmd_append(&cmd, "/Wall");
-    cmd_append(&cmd, "/wd5045", "/wd4820", "/wd5105");
+    cmd_append(&cmd, "/wd5045", "/wd4820", "/wd5105", "/wd4711", "/wd4710");
     cmd_append(&cmd, "/Fo:"OBJ_FOLDER);
     cmd_append(&cmd, "/Fe:"OUTPUT_FOLDER"wmux.exe");
+    cmd_append(&cmd, "/Oxt");
     cmd_append(&cmd, "wmux.c");
+    cmd_append(&cmd, "wmux_server.c");
     if (!cmd_run(&cmd)) return 1;
 
     //  cmd_append(&cmd, OUTPUT_FOLDER"wmux.exe");
