@@ -166,49 +166,118 @@ typedef enum {
     UNCONNECTED
 } PipeState;
 
+typedef struct {
+    HPCON virtual_console;
+    LPPROC_THREAD_ATTRIBUTE_LIST virtual_console_attribute_list;
+    HANDLE console_input_read_end, console_input_write_end;
+    HANDLE console_output_read_end, console_output_write_end;
+    OVERLAPPED console_output_read_end_overlapped;
+    PROCESS_INFORMATION process;
+    COORD console_size;
+} WmuxInstance;
+
+WmuxInstance wmux_instance_new(void) {
+    return (WmuxInstance){0};
+}
+
+void wmux_instance_free(WmuxInstance *instance)
+{
+    if (instance == NULL) return;
+    if (instance->process.hThread && instance->process.hThread != INVALID_HANDLE_VALUE) CloseHandle(instance->process.hThread);
+    if (instance->process.hProcess && instance->process.hProcess != INVALID_HANDLE_VALUE) CloseHandle(instance->process.hProcess);
+
+    if (instance->console_input_write_end && instance->console_input_write_end != INVALID_HANDLE_VALUE) CloseHandle(instance->console_input_write_end);
+    if (instance->console_input_read_end && instance->console_input_read_end != INVALID_HANDLE_VALUE) CloseHandle(instance->console_input_read_end);
+
+    if (instance->console_output_read_end_overlapped.hEvent && instance->console_output_read_end_overlapped.hEvent != INVALID_HANDLE_VALUE) CloseHandle(instance->console_output_read_end_overlapped.hEvent);
+
+    if (instance->console_output_write_end && instance->console_output_write_end != INVALID_HANDLE_VALUE) CloseHandle(instance->console_output_write_end);
+    if (instance->console_output_read_end && instance->console_output_read_end != INVALID_HANDLE_VALUE) CloseHandle(instance->console_output_read_end);
+
+    if (instance->virtual_console_attribute_list) free(instance->virtual_console_attribute_list);
+    if (instance->virtual_console) ClosePseudoConsole(instance->virtual_console);
+    ZeroMemory(instance, sizeof(*instance));
+}
+
+bool wmux_instance_resize_console(WmuxInstance *instance, COORD new_size) {
+    if (instance->console_size.X == new_size.X && instance->console_size.Y == new_size.Y) {
+        return true;
+    }
+    HRESULT resize_result = ResizePseudoConsole(instance->virtual_console, new_size);
+    if (resize_result != S_OK) {
+        nob_log(NOB_WARNING, "Failed to resize wmux instance (%d)", resize_result);
+        return false;
+    }
+    return true;
+}
+
+bool wmux_instance_create(WmuxInstance *instance, COORD console_init_size, char *shell) {
+    do {
+        if (!CreatePipe(&instance->console_input_read_end, &instance->console_input_write_end, NULL, 0)) {
+            nob_log(NOB_ERROR, "Failed to setup console input pipe, %s", win32_error_message(GetLastError()));
+            break;
+        }
+
+        if (!create_async_connected_named_pipe(
+                    POWERSHELL_STDOUT_PIPE_NAME,
+                    &instance->console_output_read_end,
+                    &instance->console_output_read_end_overlapped,
+                    &instance->console_output_write_end)) {
+            nob_log(NOB_ERROR, "Failed to create async connected named pipe, %s", win32_error_message(GetLastError()));
+            break;
+        }
+
+        if (!create_virtual_console(
+                    &instance->virtual_console,
+                    &instance->virtual_console_attribute_list,
+                    instance->console_output_write_end,
+                    instance->console_input_read_end,
+                    console_init_size)) {
+            nob_log(NOB_ERROR, "Failed to virtual console, %s", win32_error_message(GetLastError()));
+            break;
+        }
+
+        STARTUPINFOEXA startup_info = {
+            .StartupInfo.cb = sizeof(STARTUPINFOEXA),
+            .lpAttributeList = instance->virtual_console_attribute_list,
+        };
+
+        BOOL success = CreateProcessA(
+            NULL,
+            shell,
+            NULL,
+            NULL,
+            FALSE,
+            EXTENDED_STARTUPINFO_PRESENT,
+            NULL,
+            NULL,
+            &startup_info.StartupInfo,
+            &instance->process
+        );
+        if (!success) {
+            nob_log(NOB_ERROR, "Failed to create shell process, %s", win32_error_message(GetLastError()));
+            break;
+        }
+
+        instance->console_size = console_init_size;
+
+        nob_log(NOB_INFO, "Successfully create a new shell instance, pid %d", instance->process.dwProcessId);
+        return true;
+    } while (false);
+
+    wmux_instance_free(instance);
+
+    return false;
+}
+
 int server_main(COORD console_init_size) {
-    HANDLE console_input_read_end = INVALID_HANDLE_VALUE, console_input_write_end = INVALID_HANDLE_VALUE;
-    if (!CreatePipe(&console_input_read_end, &console_input_write_end, NULL, 0)) {
-        nob_log(NOB_ERROR, "Failed to setup console input pipe, %s", win32_error_message(GetLastError()));
-        return 1;
-    }
-
-    HANDLE console_output_read_end = INVALID_HANDLE_VALUE, console_output_write_end = INVALID_HANDLE_VALUE;
-    OVERLAPPED console_output_read_end_overlapped = {0};
-    if (!create_async_connected_named_pipe(POWERSHELL_STDOUT_PIPE_NAME, &console_output_read_end, &console_output_read_end_overlapped, &console_output_write_end)) {
-        return 1;
-    }
-
-    HPCON virtual_console = {0};
-    LPPROC_THREAD_ATTRIBUTE_LIST virtual_console_proc_thread_attribute_list = NULL;
-    if (!create_virtual_console(&virtual_console, &virtual_console_proc_thread_attribute_list, console_output_write_end, console_input_read_end, console_init_size)) {
-        return 1;
-    }
-
-    STARTUPINFOEXA startup_info = {
-        .StartupInfo.cb = sizeof(STARTUPINFOEXA),
-        .lpAttributeList = virtual_console_proc_thread_attribute_list,
-    };
-
-    PROCESS_INFORMATION process_info = {0};
-    BOOL success = CreateProcessA(
-        NULL,
-        "powershell -NoLogo",
-        NULL,
-        NULL,
-        FALSE,
-        EXTENDED_STARTUPINFO_PRESENT,
-        NULL,
-        NULL,
-        &startup_info.StartupInfo,
-        &process_info
-    );
-    if (!success) {
-        nob_log(NOB_ERROR, "Failed to create shell process, %s", win32_error_message(GetLastError()));
-        return 1;
-    }
-
     nob_log(NOB_INFO, "Powershell process created");
+
+
+    WmuxInstance shell_instance = wmux_instance_new();
+    if (!wmux_instance_create(&shell_instance, console_init_size, "powershell -NoLogo")) {
+        return 1;
+    }
 
     PipeState output_state = UNCONNECTED;
     OVERLAPPED output_write_end_overlapped = {0};
@@ -231,8 +300,8 @@ int server_main(COORD console_init_size) {
     HANDLE handles[] = {
         [SERVER_INPUT_INDEX] = input_read_end_overlapped.hEvent,
         [SERVER_OUTPUT_INDEX] = output_write_end_overlapped.hEvent,
-        [PROCESS_HANDLE_INDEX] = process_info.hProcess,
-        [CONSOLE_OUTPUT_INDEX] = console_output_read_end_overlapped.hEvent,
+        [PROCESS_HANDLE_INDEX] = shell_instance.process.hProcess,
+        [CONSOLE_OUTPUT_INDEX] = shell_instance.console_output_read_end_overlapped.hEvent,
     };
 
 
@@ -247,7 +316,7 @@ int server_main(COORD console_init_size) {
     bool reset_connection = false;
 
     while (running) {
-        while (output_state == UNCONNECTED && WaitForSingleObject(process_info.hProcess, 10) == WAIT_TIMEOUT) {
+        while (output_state == UNCONNECTED && WaitForSingleObject(shell_instance.process.hProcess, 10) == WAIT_TIMEOUT) {
             ConnectNamedPipe(output_write_end, &output_write_end_overlapped);
             DWORD connect_error_code = GetLastError();
             if (connect_error_code == ERROR_PIPE_CONNECTED) {
@@ -265,7 +334,7 @@ int server_main(COORD console_init_size) {
             output_state = CONNECTING;
         }
 
-        while (input_state == UNCONNECTED && WaitForSingleObject(process_info.hProcess, 10) == WAIT_TIMEOUT) {
+        while (input_state == UNCONNECTED && WaitForSingleObject(shell_instance.process.hProcess, 10) == WAIT_TIMEOUT) {
             ConnectNamedPipe(input_read_end, &input_read_end_overlapped);
             DWORD connect_error_code = GetLastError();
             if (connect_error_code == ERROR_PIPE_CONNECTED) {
@@ -318,18 +387,15 @@ int server_main(COORD console_init_size) {
                     break;
                 } else if (bytes == sizeof(COORD) + 2 && input_buffer[0] == 0 && input_buffer[sizeof(COORD)+1] == 0) {
                     COORD new_size = *(COORD*)&input_buffer[1];
-                    HRESULT resize_result = ResizePseudoConsole(virtual_console, new_size);
-                    if (resize_result != S_OK) {
-                        nob_log(NOB_WARNING, "Failed to resize virtual console (%d)", resize_result);
-                    } else {
+                    if (wmux_instance_resize_console(&shell_instance, new_size)) {
                         nob_log(NOB_INFO, "Resize virtual console -> %dx%d", new_size.X, new_size.Y);
                     }
-                } else if (!WriteFile(console_input_write_end, input_buffer, bytes*sizeof(*input_buffer), NULL, NULL)) {
+                } else if (!WriteFile(shell_instance.console_input_write_end, input_buffer, bytes*sizeof(*input_buffer), NULL, NULL)) {
                     nob_log(NOB_ERROR, "Failed to write input to process, %s", win32_error_message(GetLastError()));
                     break;
                 }
 
-                if (!start_read(input_buffer, ARRAY_LEN(input_buffer), input_read_end, &input_read_end_overlapped, console_input_write_end)) {
+                if (!start_read(input_buffer, ARRAY_LEN(input_buffer), input_read_end, &input_read_end_overlapped, shell_instance.console_input_write_end)) {
                     reset_connection = true;
                     break;
                 }
@@ -350,7 +416,7 @@ int server_main(COORD console_init_size) {
                         reset_connection = true;
                     }
 
-                    if (no_client_before && !start_read(output_buffer, ARRAY_LEN(output_buffer), console_output_read_end, &console_output_read_end_overlapped, output_write_end)) {
+                    if (no_client_before && !start_read(output_buffer, ARRAY_LEN(output_buffer), shell_instance.console_output_read_end, &shell_instance.console_output_read_end_overlapped, output_write_end)) {
                         break;
                     }
 
@@ -359,7 +425,7 @@ int server_main(COORD console_init_size) {
             } break;
 
             case CONSOLE_OUTPUT_INDEX: {
-                if (!GetOverlappedResult(console_output_read_end, &console_output_read_end_overlapped, &bytes, FALSE)) {
+                if (!GetOverlappedResult(shell_instance.console_output_read_end, &shell_instance.console_output_read_end_overlapped, &bytes, FALSE)) {
                     nob_log(NOB_WARNING, "Failed to get console output overlapped result, %s", win32_error_message(GetLastError()));
                     break;
                 }
@@ -383,8 +449,8 @@ int server_main(COORD console_init_size) {
 
                 if (!start_read(output_buffer,
                                 ARRAY_LEN(output_buffer),
-                                console_output_read_end,
-                                &console_output_read_end_overlapped,
+                                shell_instance.console_output_read_end,
+                                &shell_instance.console_output_read_end_overlapped,
                                 output_write_end)) {
                     break;
                 }
@@ -412,16 +478,7 @@ int server_main(COORD console_init_size) {
     CloseHandle(input_read_end_overlapped.hEvent);
     CloseHandle(input_read_end);
 
-    CloseHandle(process_info.hThread);
-    CloseHandle(process_info.hProcess);
-
-    CloseHandle(console_input_write_end);
-    CloseHandle(console_input_read_end);
-    CloseHandle(console_output_write_end);
-    CloseHandle(console_output_read_end_overlapped.hEvent);
-    CloseHandle(console_output_read_end);
-    free(virtual_console_proc_thread_attribute_list);
-    ClosePseudoConsole(virtual_console);
+    wmux_instance_free(&shell_instance);
 
     nob_log(NOB_INFO, "Server exited");
 
