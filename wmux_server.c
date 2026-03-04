@@ -270,12 +270,22 @@ bool wmux_instance_create(WmuxInstance *instance, COORD console_init_size, char 
     return false;
 }
 
+char preserve_buffer[4 * 1024 * 1024] = {0};
+size_t preserve_buffer_count = 0;
+char input_buffer[PIPE_BUFFER_SIZE] = {0};
+char output_buffer[PIPE_BUFFER_SIZE] = {0};
+
 int server_main(COORD console_init_size) {
     nob_log(NOB_INFO, "Powershell process created");
 
 
     WmuxInstance shell_instance = wmux_instance_new();
     if (!wmux_instance_create(&shell_instance, console_init_size, "powershell -NoLogo")) {
+        return 1;
+    }
+
+    if (!WriteFile(shell_instance.console_input_write_end, DISABLE_WIN32_INPUT_MODE, (DWORD)strlen(DISABLE_WIN32_INPUT_MODE), NULL, NULL)) {
+        nob_log(NOB_WARNING, "Failed to disable win32 input mode");
         return 1;
     }
 
@@ -305,11 +315,6 @@ int server_main(COORD console_init_size) {
     };
 
 
-    char preserve_buffer[PIPE_BUFFER_SIZE * 32] = {0};
-    size_t preserve_buffer_count = 0;
-
-    char input_buffer[PIPE_BUFFER_SIZE] = {0};
-    char output_buffer[PIPE_BUFFER_SIZE] = {0};
     bool no_client_before = true;
 
     bool running = true;
@@ -472,11 +477,20 @@ int server_main(COORD console_init_size) {
         }
     }
 
-    CloseHandle(output_write_end_overlapped.hEvent);
-    CloseHandle(output_write_end);
+    if (output_write_end_overlapped.hEvent && output_write_end_overlapped.hEvent != INVALID_HANDLE_VALUE) {
+        CloseHandle(output_write_end_overlapped.hEvent);
+    }
+    if (output_write_end && output_write_end != INVALID_HANDLE_VALUE) {
+        CloseHandle(output_write_end);
+    }
 
-    CloseHandle(input_read_end_overlapped.hEvent);
-    CloseHandle(input_read_end);
+    if (input_read_end_overlapped.hEvent && input_read_end_overlapped.hEvent != INVALID_HANDLE_VALUE) {
+        CloseHandle(input_read_end_overlapped.hEvent);
+    }
+
+    if (input_read_end && input_read_end != INVALID_HANDLE_VALUE) {
+        CloseHandle(input_read_end);
+    }
 
     wmux_instance_free(&shell_instance);
 

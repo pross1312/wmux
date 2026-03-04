@@ -11,9 +11,6 @@
 
 #define DETACHED_CODE 24 // CTRL-X
 
-static const char * const DISABLE_WIN32_INPUT_MODE = "\x1b[?9001l";
-static const char * const ENABLE_WIN32_INPUT_MODE = "\x1b[?9001h";
-
 bool start_read(char *buffer, size_t buffer_size, HANDLE handle, OVERLAPPED *overlapped, HANDLE out_handle) {
     DWORD bytes = 0;
     while (true) {
@@ -53,7 +50,7 @@ bool setup_client_console_mode(void) {
 
     HANDLE console_output = GetStdHandle(STD_OUTPUT_HANDLE);
     if (!GetConsoleMode(console_output, &console_output_mode) ||
-        !SetConsoleMode(console_output, ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT | DISABLE_NEWLINE_AUTO_RETURN)) {
+        !SetConsoleMode(console_output, ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT | DISABLE_NEWLINE_AUTO_RETURN | ENABLE_WRAP_AT_EOL_OUTPUT)) {
         nob_log(NOB_ERROR, "Failed to set output console mode, %s", win32_error_message(GetLastError()));
         return false;
     }
@@ -75,6 +72,18 @@ bool setup_client_console_mode(void) {
         nob_log(NOB_ERROR, "Failed to set console input codepoint to (%d), %s", UTF8_CODEPOINT, win32_error_message(GetLastError()));
         return false;
     }
+
+    if (!WriteFile(console_output, DISABLE_WIN32_INPUT_MODE, (DWORD)strlen(DISABLE_WIN32_INPUT_MODE), NULL, NULL)) {
+        nob_log(NOB_WARNING, "Failed to disable win32 input mode");
+        return false;
+    }
+
+    const char* clear_seq = "\x1b[2J";
+    if (!WriteFile(console_output, clear_seq, (DWORD)strlen(clear_seq), NULL, NULL)) {
+        nob_log(NOB_ERROR, "Failed to clear sreen, %s", win32_error_message(GetLastError()));
+        return false;
+    }
+
     return true;
 }
 
@@ -107,6 +116,9 @@ DWORD WINAPI client_output_reader(void *arg) {
         NULL
     );
 
+    char buffer[PIPE_BUFFER_SIZE] = {0};
+    DWORD bytes_read = 0;
+
     OVERLAPPED server_output_overlapped = {0};
     server_output_overlapped.hEvent = INVALID_HANDLE_VALUE;
     do {
@@ -126,15 +138,6 @@ DWORD WINAPI client_output_reader(void *arg) {
 
         nob_log(NOB_INFO, "Server output connected");
 
-        char buffer[PIPE_BUFFER_SIZE] = {0};
-        DWORD bytes_read = 0;
-
-        const char* clear_seq = "\x1b[2J";
-        if (!WriteFile(console_output, clear_seq, (DWORD)strlen(clear_seq), NULL, NULL)) {
-            nob_log(NOB_ERROR, "Failed to clear sreen, %s", win32_error_message(GetLastError()));
-            break;
-        }
-
         if (!start_read(buffer, ARRAY_LEN(buffer), server_output, &server_output_overlapped, console_output)) {
             break;
         }
@@ -145,8 +148,6 @@ DWORD WINAPI client_output_reader(void *arg) {
             [CLIENT_READER_DETACHED_EVENT_INDEX] = detached_event,
             [CLIENT_READER_SERVER_OUTPUT_INDEX] = server_output_overlapped.hEvent,
         };
-
-        bool first = true;
 
         while (true) {
             DWORD result = WaitForMultipleObjects(ARRAY_LEN(handles), handles, FALSE, INFINITE);
@@ -173,12 +174,6 @@ DWORD WINAPI client_output_reader(void *arg) {
 
                 if (!WriteFile(console_output, buffer, bytes_read, NULL, NULL)) {
                     break;
-                }
-
-                if (first && !WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), DISABLE_WIN32_INPUT_MODE, (DWORD)strlen(DISABLE_WIN32_INPUT_MODE), NULL, NULL)) {
-                    nob_log(NOB_WARNING, "Failed to disable win32 input mode");
-                } else {
-                    first = false;
                 }
 
                 if (!start_read(buffer, ARRAY_LEN(buffer), server_output, &server_output_overlapped, console_output)) {
@@ -446,3 +441,4 @@ int main(int argc, char **argv) {
 // [X] TODO: allow disconnect client with command/keybinding
 // [X] TODO: buffer output from powershell and send them to client on connected
 // [X] TODO: fix codepoint, vim, resize issue
+// [X] TODO: fix wrap text
