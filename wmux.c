@@ -73,12 +73,7 @@ bool setup_client_console_mode(void) {
         return false;
     }
 
-    if (!WriteFile(console_output, DISABLE_WIN32_INPUT_MODE, (DWORD)strlen(DISABLE_WIN32_INPUT_MODE), NULL, NULL)) {
-        nob_log(NOB_WARNING, "Failed to disable win32 input mode");
-        return false;
-    }
-
-    const char* clear_seq = "\x1b[2J";
+    const char* clear_seq = "\x1b[2J\x1b[1;1H";
     if (!WriteFile(console_output, clear_seq, (DWORD)strlen(clear_seq), NULL, NULL)) {
         nob_log(NOB_ERROR, "Failed to clear sreen, %s", win32_error_message(GetLastError()));
         return false;
@@ -148,6 +143,7 @@ DWORD WINAPI client_output_reader(void *arg) {
             [CLIENT_READER_DETACHED_EVENT_INDEX] = detached_event,
             [CLIENT_READER_SERVER_OUTPUT_INDEX] = server_output_overlapped.hEvent,
         };
+        bool first = true;
 
         while (true) {
             DWORD result = WaitForMultipleObjects(ARRAY_LEN(handles), handles, FALSE, INFINITE);
@@ -174,6 +170,13 @@ DWORD WINAPI client_output_reader(void *arg) {
 
                 if (!WriteFile(console_output, buffer, bytes_read, NULL, NULL)) {
                     break;
+                }
+
+                if (first && !WriteFile(console_output, DISABLE_WIN32_INPUT_MODE, (DWORD)strlen(DISABLE_WIN32_INPUT_MODE), NULL, NULL)) {
+                    nob_log(NOB_WARNING, "Failed to disable win32 input mode");
+                    return false;
+                } else {
+                    first = false;
                 }
 
                 if (!start_read(buffer, ARRAY_LEN(buffer), server_output, &server_output_overlapped, console_output)) {

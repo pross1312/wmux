@@ -270,7 +270,7 @@ bool wmux_instance_create(WmuxInstance *instance, COORD console_init_size, char 
     return false;
 }
 
-char preserve_buffer[4 * 1024 * 1024] = {0};
+char preserve_buffer[16 * 1024] = {0};
 size_t preserve_buffer_count = 0;
 char input_buffer[PIPE_BUFFER_SIZE] = {0};
 char output_buffer[PIPE_BUFFER_SIZE] = {0};
@@ -281,11 +281,6 @@ int server_main(COORD console_init_size) {
 
     WmuxInstance shell_instance = wmux_instance_new();
     if (!wmux_instance_create(&shell_instance, console_init_size, "powershell -NoLogo")) {
-        return 1;
-    }
-
-    if (!WriteFile(shell_instance.console_input_write_end, DISABLE_WIN32_INPUT_MODE, (DWORD)strlen(DISABLE_WIN32_INPUT_MODE), NULL, NULL)) {
-        nob_log(NOB_WARNING, "Failed to disable win32 input mode");
         return 1;
     }
 
@@ -319,6 +314,7 @@ int server_main(COORD console_init_size) {
 
     bool running = true;
     bool reset_connection = false;
+    bool first = true;
 
     while (running) {
         while (output_state == UNCONNECTED && WaitForSingleObject(shell_instance.process.hProcess, 10) == WAIT_TIMEOUT) {
@@ -398,6 +394,14 @@ int server_main(COORD console_init_size) {
                 } else if (!WriteFile(shell_instance.console_input_write_end, input_buffer, bytes*sizeof(*input_buffer), NULL, NULL)) {
                     nob_log(NOB_ERROR, "Failed to write input to process, %s", win32_error_message(GetLastError()));
                     break;
+                }
+
+                if (first) {
+                    first = false;
+                    if (!WriteFile(shell_instance.console_output_write_end, DISABLE_WIN32_INPUT_MODE, (DWORD)strlen(DISABLE_WIN32_INPUT_MODE), NULL, NULL)) {
+                        nob_log(NOB_WARNING, "Failed to disable win32 input mode");
+                        return 1;
+                    }
                 }
 
                 if (!start_read(input_buffer, ARRAY_LEN(input_buffer), input_read_end, &input_read_end_overlapped, shell_instance.console_input_write_end)) {
